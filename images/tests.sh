@@ -193,7 +193,11 @@ cat > "$temporary/bin/skopeo" <<'MOCK'
 set -euo pipefail
 
 case "$1" in
-    login) cat >/dev/null; touch logged-in ;;
+    login)
+        cat >/dev/null
+        printf '{"auths":{}}\n' > "$REGISTRY_AUTH_FILE"
+        touch logged-in
+        ;;
     copy) touch copied ;;
     inspect) cat "$TEST_INDEX" ;;
     manifest-digest) printf 'sha256:%s\n' "$(sha256sum "$2" | awk '{print $1}')" ;;
@@ -206,8 +210,18 @@ cat > "$temporary/bin/podman" <<'MOCK'
 set -euo pipefail
 
 case "$1/$2" in
-    manifest/create) ;;
-    manifest/push)
+    manifest/create)
+        # Creating with remote sources bypasses explicit authentication.
+        [[ $# == 3 ]]
+        ;;
+    manifest/add|manifest/push)
+        [[ $3 == --authfile && $4 == "$REGISTRY_AUTH_FILE" && -f $4 ]]
+
+        if [[ $2 == add ]]; then
+            touch authenticated-add
+            exit 0
+        fi
+
         while [[ $# -gt 0 ]]; do
             if [[ $1 == --digestfile ]]; then
                 printf 'sha256:%s\n' "$(sha256sum "$TEST_INDEX" | awk '{print $1}')" > "$2"
@@ -269,7 +283,8 @@ done
 for state in missing unused; do
     release registry "TEST_PACKAGES=$state" >/dev/null
     [[ -f $temporary/copied ]]
-    rm -- "$temporary/copied"
+    [[ -f $temporary/authenticated-add ]]
+    rm -- "$temporary/copied" "$temporary/authenticated-add"
     printf 'Passed: registry publication with %s package tags\n' "$state"
 done
 
