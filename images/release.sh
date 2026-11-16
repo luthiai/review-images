@@ -123,8 +123,13 @@ case "$mode" in
             amd64=$(jq -r '.image_digest' "$builds/$agent/amd64/build.json")
             arm64=$(jq -r '.image_digest' "$builds/$agent/arm64/build.json")
             list=localhost/review-$agent-$version-$$
-            podman manifest create "$list" "docker://$image@$amd64" "docker://$image@$arm64"
-            podman manifest push --all --format oci --rm --digestfile "$temporary/digest" \
+            podman manifest create "$list"
+
+            for digest in "$amd64" "$arm64"; do
+                podman manifest add --authfile "$REGISTRY_AUTH_FILE" "$list" "docker://$image@$digest"
+            done
+
+            podman manifest push --authfile "$REGISTRY_AUTH_FILE" --all --format oci --rm --digestfile "$temporary/digest" \
                 "$list" "docker://$image:$version"
 
             digest=$(cat "$temporary/digest")
