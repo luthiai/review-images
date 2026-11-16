@@ -35,6 +35,7 @@ For container pulls, use a release tag or image digest from GHCR.
 The [release workflow](.github/workflows/images.yml) builds both architectures, runs smoke checks,
 and publishes the GHCR images and GitHub release downloads.
 Existing releases and fixed image tags are never overwritten.
+To retry under a new tag after images were pushed, use a new commit too.
 
 The Apache-2.0 license covers this repository's source.
 Distributed packages and CLIs retain their own licenses.

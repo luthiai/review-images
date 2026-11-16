@@ -95,12 +95,14 @@ case "$mode" in
 
         # Check both packages before pushing any fixed tags.
         for agent in claude codex; do
+            # A 404 may hide an inaccessible package; existing packages must grant this repository Actions access.
             if gh api "orgs/luthiai/packages/container/review-$agent/versions?per_page=100" --paginate \
                 > "$temporary/versions.json" 2> "$temporary/error"; then
                 jq -e -s --arg version "$version" --arg sha "sha-$source_commit" '
                     all(.[][] | .metadata.container.tags[];
                         . != $version and . != ($version + "-amd64") and . != ($version + "-arm64") and . != $sha)
-                ' "$temporary/versions.json" >/dev/null || fail "Fixed image tag already exists for review-$agent"
+                ' "$temporary/versions.json" >/dev/null \
+                    || fail "Fixed image tag already exists for review-$agent. Use a new commit and release tag."
             elif ! grep -Fq '(HTTP 404)' "$temporary/error"; then
                 cat "$temporary/error" >&2
                 fail "Cannot check existing image tags for review-$agent"

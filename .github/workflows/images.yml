@@ -43,6 +43,7 @@ jobs:
             exit 1
           fi
 
+          # Preflight has contents: read; the publish job also checks drafts with contents: write.
           gh api 'repos/luthiai/review-images/releases?per_page=100' --paginate > "$RUNNER_TEMP/releases.json"
 
           if ! jq -e -s --arg version "$GITHUB_REF_NAME" 'all(.[][]; .tag_name != $version)' \
