@@ -43,14 +43,11 @@ jobs:
             exit 1
           fi
 
-          if gh api "repos/luthiai/review-images/releases/tags/$GITHUB_REF_NAME" \
-            > /dev/null 2> "$RUNNER_TEMP/preflight-error"; then
-            echo 'Release already exists, including drafts. Use a new version.' >&2
-            exit 1
-          fi
+          gh api 'repos/luthiai/review-images/releases?per_page=100' --paginate > "$RUNNER_TEMP/releases.json"
 
-          if ! grep -Fq '(HTTP 404)' "$RUNNER_TEMP/preflight-error"; then
-            cat "$RUNNER_TEMP/preflight-error" >&2
+          if ! jq -e -s --arg version "$GITHUB_REF_NAME" 'all(.[][]; .tag_name != $version)' \
+            "$RUNNER_TEMP/releases.json" > /dev/null; then
+            echo 'Release already exists. Use a new version.' >&2
             exit 1
           fi
 

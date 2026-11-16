@@ -160,20 +160,18 @@ case "$mode" in
             printf '\nNative container smoke checks passed. Live OpenShell model tool execution needs a separate operator check.\n'
         } > "$temporary/notes.md"
 
-        if gh api "repos/luthiai/review-images/releases/tags/$version" \
-            > "$temporary/release.json" 2> "$temporary/error"; then
-            fail 'Release already exists, including drafts. Use a new version.'
-        fi
+        # This job has contents:write, so the release list includes drafts.
+        gh api 'repos/luthiai/review-images/releases?per_page=100' --paginate > "$temporary/releases.json"
 
-        if ! grep -Fq '(HTTP 404)' "$temporary/error"; then
-            cat "$temporary/error" >&2
-            fail 'Cannot establish whether the release exists'
-        fi
+        jq -e -s --arg version "$version" 'all(.[][]; .tag_name != $version)' \
+            "$temporary/releases.json" > /dev/null || fail 'Release already exists, including drafts. Use a new version.'
 
         gh release create "$version" --repo luthiai/review-images --draft --verify-tag \
             --target "$source_commit" --title "$version" --notes-file "$temporary/notes.md" "${files[@]}"
-        gh api "repos/luthiai/review-images/releases/tags/$version" > "$temporary/release.json"
-        jq -e '.draft == true and (.assets | length) == 10' "$temporary/release.json" >/dev/null
+        release_api=$(gh release view "$version" --repo luthiai/review-images --json apiUrl --jq .apiUrl)
+        gh api "$release_api" > "$temporary/release.json"
+        jq -e --arg version "$version" '.tag_name == $version and .draft == true and (.assets | length) == 10' \
+            "$temporary/release.json" >/dev/null
 
         for file in "${files[@]}"; do
             jq -e --arg name "${file##*/}" --arg digest "sha256:$(sha256sum "$file" | awk '{print $1}')" \
@@ -183,8 +181,8 @@ case "$mode" in
             ' "$temporary/release.json" >/dev/null || fail "Uploaded asset differs: $file"
         done
 
-        gh release edit "$version" --repo luthiai/review-images --draft=false --latest
-        gh api "repos/luthiai/review-images/releases/tags/$version" | jq -e '.draft == false' >/dev/null
+        gh api "$release_api" --method PATCH -F draft=false -f make_latest=true > "$temporary/release.json"
+        jq -e '.draft == false' "$temporary/release.json" >/dev/null
         ;;
     latest)
         gh api "repos/luthiai/review-images/releases/tags/$version" | jq -e '.draft == false' >/dev/null

@@ -85,33 +85,68 @@ cat > "$temporary/bin/gh" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
 
+not_found() {
+    echo 'gh: Not Found (HTTP 404)' >&2
+    exit 1
+}
+
 case "$1/$2" in
     api/*)
         case "${TEST_RELEASE:-}" in
-            exists) printf '{"draft":false}\n'; exit 0 ;;
-            draft) printf '{"draft":true}\n'; exit 0 ;;
             denied) echo 'gh: Forbidden (HTTP 403)' >&2; exit 1 ;;
             network) echo 'error connecting to api.github.com' >&2; exit 1 ;;
         esac
 
-        if [[ -f release.json ]]; then
-            cat release.json
+        if [[ ${TEST_RELEASE:-} == exists || ${TEST_RELEASE:-} == draft ]]; then
+            draft=false
+            [[ $TEST_RELEASE != draft ]] || draft=true
+            record=$(jq -n --arg tag "$GITHUB_REF_NAME" --argjson draft "$draft" \
+                '{id: 123, tag_name: $tag, draft: $draft, assets: []}')
+        elif [[ -f release.json ]]; then
+            record=$(cat release.json)
         else
-            echo 'gh: Not Found (HTTP 404)' >&2
-            exit 1
+            record=null
         fi
+
+        case "$2" in
+            */releases\?per_page=100)
+                [[ ${3:-} == --paginate ]]
+                # Put the matching release on a later page.
+                jq -nc '[range(100) | {tag_name: ("older-" + tostring), draft: false}]'
+                jq -n --argjson record "$record" 'if $record == null then [] else [$record] end'
+                ;;
+            */releases/tags/*)
+                [[ $record != null && $(jq -r '.draft' <<< "$record") == false ]] || not_found
+                printf '%s\n' "$record"
+                ;;
+            */releases/123)
+                [[ $record != null ]] || not_found
+
+                if [[ ${3:-} == --method ]]; then
+                    [[ $4 == PATCH ]]
+                    jq '.draft = false' <<< "$record" > release.json
+                    touch published
+                    cat release.json
+                else
+                    printf '%s\n' "$record"
+                fi
+                ;;
+            *) exit 1 ;;
+        esac
         ;;
     release/create)
+        touch created
         for file in dist/*; do
             jq -n --arg name "${file##*/}" --arg digest "sha256:$(sha256sum "$file" | awk '{print $1}')" \
                 --argjson size "$(wc -c < "$file")" '{name: $name, digest: $digest, size: $size, state: "uploaded"}'
-        done | jq -s --arg bad "${TEST_BAD_DIGEST:-false}" '
-            {draft: true, assets: .} | if $bad == "true" then .assets[0].digest = "wrong" else . end
+        done | jq -s --arg tag "$GITHUB_REF_NAME" --arg bad "${TEST_BAD_DIGEST:-false}" '
+            {id: 123, tag_name: $tag, draft: true, assets: .}
+            | if $bad == "true" then .assets[0].digest = "wrong" else . end
         ' > release.json
         ;;
-    release/edit)
-        touch published
-        printf '{"draft":false}\n' > release.json
+    release/view)
+        [[ -f release.json ]]
+        printf 'https://api.github.com/repos/luthiai/review-images/releases/123\n'
         ;;
     *) exit 1 ;;
 esac
@@ -135,15 +170,21 @@ release() (
 
 for state in exists draft denied network; do
     expect_failure "publication release state: $state" release publish "TEST_RELEASE=$state"
+    [[ ! -e $temporary/created ]]
 done
 
 for state in absent draft denied network; do
     expect_failure "latest release state: $state" release latest "TEST_RELEASE=$state"
 done
 
+expect_failure 'tag endpoint hides draft releases' env "PATH=$temporary/bin:$PATH" TEST_RELEASE=draft \
+    gh api "repos/luthiai/review-images/releases/tags/$GITHUB_REF_NAME"
+
 expect_failure 'uploaded digest mismatch blocks publication' release publish TEST_BAD_DIGEST=true
 [[ ! -e $temporary/published ]]
+cp "$temporary/release.json" "$temporary/original-draft.json"
 expect_failure 'existing draft blocks publication on retry' release publish
+cmp "$temporary/original-draft.json" "$temporary/release.json"
 rm -- "$temporary/release.json"
 release publish >/dev/null
 [[ -f $temporary/published ]]
