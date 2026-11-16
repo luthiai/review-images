@@ -77,6 +77,7 @@ expect_failure 'duplicate checksum entries' bash "$images_dir/release.sh" prepar
 cp "$temporary/sums" "${record%/*}/SHA256SUMS"
 printf 'tampered\n' >> "$temporary/build/codex/arm64/image.oci.tar"
 expect_failure 'changed saved image' bash "$images_dir/release.sh" prepare "$temporary/build" "$temporary/tampered"
+printf 'checked OCI archive fixture\n' > "$temporary/build/codex/arm64/image.oci.tar"
 
 mkdir "$temporary/bin"
 
@@ -97,7 +98,7 @@ case "$1/$2" in
             network) echo 'error connecting to api.github.com' >&2; exit 1 ;;
         esac
 
-        if [[ ${TEST_RELEASE:-} == exists || ${TEST_RELEASE:-} == draft ]]; then
+        if [[ ${TEST_RELEASE:-} == exists || ${TEST_RELEASE:-} == draft || ${TEST_RELEASE:-} == older ]]; then
             draft=false
             [[ $TEST_RELEASE != draft ]] || draft=true
             record=$(jq -n --arg tag "$GITHUB_REF_NAME" --argjson draft "$draft" \
@@ -109,6 +110,26 @@ case "$1/$2" in
         fi
 
         case "$2" in
+            */packages/container/review-*/versions\?per_page=100)
+                case "${TEST_PACKAGES:-missing}" in
+                    missing) not_found ;;
+                    denied) echo 'gh: Forbidden (HTTP 403)' >&2; exit 1 ;;
+                    network) echo 'error connecting to api.github.com' >&2; exit 1 ;;
+                    version) tag=$GITHUB_REF_NAME ;;
+                    amd64|arm64) tag=$GITHUB_REF_NAME-$TEST_PACKAGES ;;
+                    sha) tag=sha-$GITHUB_SHA ;;
+                    unused) tag=unrelated ;;
+                    *) exit 1 ;;
+                esac
+
+                jq -nc '[range(100) | {metadata: {container: {tags: ["older"]}}}]'
+
+                if [[ $2 == *review-codex/* ]]; then
+                    jq -n --arg tag "$tag" '[{metadata: {container: {tags: [$tag]}}}]'
+                else
+                    printf '[]\n'
+                fi
+                ;;
             */releases\?per_page=100)
                 [[ ${3:-} == --paginate ]]
                 # Put the matching release on a later page.
@@ -118,6 +139,15 @@ case "$1/$2" in
             */releases/tags/*)
                 [[ $record != null && $(jq -r '.draft' <<< "$record") == false ]] || not_found
                 printf '%s\n' "$record"
+                ;;
+            */releases/latest)
+                [[ $record != null && $(jq -r '.draft' <<< "$record") == false ]] || not_found
+
+                if [[ ${TEST_RELEASE:-} == older ]]; then
+                    jq '.tag_name = "images-2000.01.01.1"' <<< "$record"
+                else
+                    printf '%s\n' "$record"
+                fi
                 ;;
             */releases/123)
                 [[ $record != null ]] || not_found
@@ -152,11 +182,50 @@ case "$1/$2" in
 esac
 MOCK
 
-chmod +x "$temporary/bin/gh"
+jq -n --arg digest "$digest" '{
+    schemaVersion: 2, mediaType: "application/vnd.oci.image.index.v1+json",
+    manifests: (["amd64", "arm64"] | map({digest: $digest, platform: {os: "linux", architecture: .}}))
+}' > "$temporary/index.json"
+index_digest=sha256:$(sha256sum "$temporary/index.json" | awk '{print $1}')
+
+cat > "$temporary/bin/skopeo" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+
+case "$1" in
+    login) cat >/dev/null; touch logged-in ;;
+    copy) touch copied ;;
+    inspect) cat "$TEST_INDEX" ;;
+    manifest-digest) printf 'sha256:%s\n' "$(sha256sum "$2" | awk '{print $1}')" ;;
+    *) exit 1 ;;
+esac
+MOCK
+
+cat > "$temporary/bin/podman" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+
+case "$1/$2" in
+    manifest/create) ;;
+    manifest/push)
+        while [[ $# -gt 0 ]]; do
+            if [[ $1 == --digestfile ]]; then
+                printf 'sha256:%s\n' "$(sha256sum "$TEST_INDEX" | awk '{print $1}')" > "$2"
+                exit 0
+            fi
+            shift
+        done
+        exit 1
+        ;;
+    *) exit 1 ;;
+esac
+MOCK
+
+chmod +x "$temporary/bin/gh" "$temporary/bin/skopeo" "$temporary/bin/podman"
 mkdir "$temporary/registry"
 
 for agent in claude codex; do
-    jq --arg agent "$agent" --arg digest "$digest" '{
+    jq --arg agent "$agent" --arg digest "$index_digest" '{
         agent: $agent, source_commit, version, index_digest: $digest, architectures: .agents[$agent].architectures
     }' "$temporary/dist/release-manifest.json" > "$temporary/registry/$agent.json"
 done
@@ -165,7 +234,8 @@ release() (
     local mode=$1
     shift
     cd -- "$temporary"
-    env "PATH=$temporary/bin:$PATH" "$@" bash "$images_dir/release.sh" "$mode"
+    env "PATH=$temporary/bin:$PATH" "TEST_INDEX=$temporary/index.json" GH_TOKEN=test GITHUB_ACTOR=test \
+        "$@" bash "$images_dir/release.sh" "$mode"
 )
 
 for state in exists draft denied network; do
@@ -173,8 +243,9 @@ for state in exists draft denied network; do
     [[ ! -e $temporary/created ]]
 done
 
-for state in absent draft denied network; do
+for state in absent draft denied network older; do
     expect_failure "latest release state: $state" release latest "TEST_RELEASE=$state"
+    [[ ! -e $temporary/copied && ! -e $temporary/logged-in ]]
 done
 
 expect_failure 'tag endpoint hides draft releases' env "PATH=$temporary/bin:$PATH" TEST_RELEASE=draft \
@@ -189,3 +260,19 @@ rm -- "$temporary/release.json"
 release publish >/dev/null
 [[ -f $temporary/published ]]
 printf 'Passed: verified draft assets publish successfully\n'
+
+for state in version amd64 arm64 sha denied network; do
+    expect_failure "registry tag protection: $state" release registry "TEST_PACKAGES=$state"
+    [[ ! -e $temporary/copied ]]
+done
+
+for state in missing unused; do
+    release registry "TEST_PACKAGES=$state" >/dev/null
+    [[ -f $temporary/copied ]]
+    rm -- "$temporary/copied"
+    printf 'Passed: registry publication with %s package tags\n' "$state"
+done
+
+release latest >/dev/null
+[[ -f $temporary/copied ]]
+printf 'Passed: latest update for the current GitHub release\n'

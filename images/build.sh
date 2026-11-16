@@ -38,7 +38,7 @@ cleanup() {
 
 trap cleanup EXIT
 
-podman build --format oci --arch "$arch" --build-arg "TARGETARCH=$arch" \
+podman build --format oci --arch "$arch" \
     --label "org.opencontainers.image.revision=$source_commit" \
     --iidfile "$temporary/image-id" "$images_dir/$agent"
 

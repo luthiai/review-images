@@ -92,6 +92,21 @@ case "$mode" in
         ;;
     registry)
         registry_login
+
+        # Check both packages before pushing any fixed tags.
+        for agent in claude codex; do
+            if gh api "orgs/luthiai/packages/container/review-$agent/versions?per_page=100" --paginate \
+                > "$temporary/versions.json" 2> "$temporary/error"; then
+                jq -e -s --arg version "$version" --arg sha "sha-$source_commit" '
+                    all(.[][] | .metadata.container.tags[];
+                        . != $version and . != ($version + "-amd64") and . != ($version + "-arm64") and . != $sha)
+                ' "$temporary/versions.json" >/dev/null || fail "Fixed image tag already exists for review-$agent"
+            elif ! grep -Fq '(HTTP 404)' "$temporary/error"; then
+                cat "$temporary/error" >&2
+                fail "Cannot check existing image tags for review-$agent"
+            fi
+        done
+
         mkdir -p registry
 
         for agent in claude codex; do
@@ -185,7 +200,9 @@ case "$mode" in
         jq -e '.draft == false' "$temporary/release.json" >/dev/null
         ;;
     latest)
-        gh api "repos/luthiai/review-images/releases/tags/$version" | jq -e '.draft == false' >/dev/null
+        gh api repos/luthiai/review-images/releases/latest \
+            | jq -e --arg version "$version" '.draft == false and .tag_name == $version' >/dev/null \
+            || fail 'Only the latest GitHub release may update the latest image tags'
         registry_login
 
         for agent in claude codex; do
