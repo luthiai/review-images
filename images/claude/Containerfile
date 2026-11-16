@@ -1,0 +1,30 @@
+FROM docker.io/library/ubuntu:noble@sha256:73b999393d07f2bf65a40373778a44dc9a6d54ad7718d29247d8ff9413c4d6a8 AS download
+ARG TARGETARCH
+ARG CLAUDE_VERSION=2.1.325
+# Verified against the versioned upstream manifest.json on 2026-11-16.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+RUN set -eu; \
+    case "$TARGETARCH" in \
+      amd64) platform=linux-x64; checksum=0dc4f4a9a165fc60746d7ae8489712e5fc352f1e7ad4eb22e7141bd0812eb0cf ;; \
+      arm64) platform=linux-arm64; checksum=7b6e484b1989a5a14a4b354709ccc8672518a3ec5b9ccd7981fc6254327fde67 ;; \
+      *) echo "Unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    curl --fail --show-error --location --retry 3 \
+      "https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/${CLAUDE_VERSION}/${platform}/claude" -o /claude; \
+    printf '%s  /claude\n' "$checksum" | sha256sum --check -; \
+    chmod 0755 /claude
+
+FROM docker.io/library/ubuntu:noble@sha256:73b999393d07f2bf65a40373778a44dc9a6d54ad7718d29247d8ff9413c4d6a8
+ARG CLAUDE_VERSION=2.1.325
+LABEL org.opencontainers.image.source="https://github.com/luthiai/review-images" \
+      org.opencontainers.image.version="${CLAUDE_VERSION}" \
+      org.opencontainers.image.base.name="docker.io/library/ubuntu:noble" \
+      org.opencontainers.image.base.digest="sha256:73b999393d07f2bf65a40373778a44dc9a6d54ad7718d29247d8ff9413c4d6a8"
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git gh libstdc++6 \
+    && rm -rf /var/lib/apt/lists/* && mkdir -p /sandbox
+COPY --from=download /claude /usr/local/bin/claude
+ENV CLAUDE_CODE_EXECUTABLE=/usr/local/bin/claude \
+    DISABLE_AUTOUPDATER=1
+WORKDIR /sandbox
+CMD ["/bin/bash"]
