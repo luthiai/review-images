@@ -1,0 +1,38 @@
+FROM docker.io/library/ubuntu:noble@sha256:73b999393d07f2bf65a40373778a44dc9a6d54ad7718d29247d8ff9413c4d6a8 AS download
+ARG TARGETARCH
+ARG CODEX_VERSION=0.169.0
+# Native CLI package digests from openai/codex's rust-v0.169.0 release assets.
+# The package includes the code-mode host and exec server needed for tool execution.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+RUN set -eu; \
+    case "$TARGETARCH" in \
+      amd64) target=x86_64-unknown-linux-musl; checksum=3b8ed091149cc63a59046b9f094bcfa21cdb4dda15ede441ce369bcee4a71ba0 ;; \
+      arm64) target=aarch64-unknown-linux-musl; checksum=c8d0b4ab2a97c595b70b10412d36d0d5464dcef1e1d3246b073d48017cdf5a4f ;; \
+      *) echo "Unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    curl --fail --show-error --location --retry 3 \
+      "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-package-${target}.tar.gz" -o /codex.tar.gz; \
+    printf '%s  /codex.tar.gz\n' "$checksum" | sha256sum --check -; \
+    mkdir /package; \
+    tar -xzf /codex.tar.gz -C /package bin codex-path codex-package.json codex-resources/bwrap; \
+    test -x /package/bin/codex; \
+    test -x /package/bin/codex-code-mode-host; \
+    test -x /package/bin/codex-exec-server
+
+FROM docker.io/library/ubuntu:noble@sha256:73b999393d07f2bf65a40373778a44dc9a6d54ad7718d29247d8ff9413c4d6a8
+ARG CODEX_VERSION=0.169.0
+LABEL org.opencontainers.image.source="https://github.com/luthiai/review-images" \
+      org.opencontainers.image.version="${CODEX_VERSION}" \
+      org.opencontainers.image.base.name="docker.io/library/ubuntu:noble" \
+      org.opencontainers.image.base.digest="sha256:73b999393d07f2bf65a40373778a44dc9a6d54ad7718d29247d8ff9413c4d6a8"
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git gh \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /etc/codex /sandbox \
+    && printf 'check_for_update_on_startup = false\n' > /etc/codex/config.toml
+# Keep upstream's relative layout for tool helpers, ripgrep, and bubblewrap.
+# Optional voice resources are not needed by the noninteractive reviewer.
+COPY --from=download /package/ /usr/local/
+ENV CODEX_PATH=/usr/local/bin/codex
+WORKDIR /sandbox
+CMD ["/bin/bash"]

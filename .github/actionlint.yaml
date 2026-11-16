@@ -1,0 +1,6 @@
+# GitHub-hosted labels verified in actions/runner-images on 2026-11-16.
+# actionlint v1.7.12 predates their addition to its built-in runner list.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04
+    - ubuntu-26.04-arm
